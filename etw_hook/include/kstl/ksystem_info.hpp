@@ -1,32 +1,30 @@
 #pragma once
+
 #include <fltKernel.h>
-/// <summary>
-/// in this head file you can get 
-///some windows kernel global var address or some system tools like bypass sign check and so on
-///  author : oxygen
-/// 
-/// </summary>
-namespace kstd {
 
+#define DUMP_BLOCK_SIZE 0X40000
 
-	
+//some windows kernel global var address or some system tools like bypass sign check and so on
 
-#ifndef _WIN64
-#define KDDEBUGGER_DATA_OFFSET 0x1068
-#else
+namespace kstd
+{
+
 #define KDDEBUGGER_DATA_OFFSET 0x2080
-#endif
 
 
 	static const unsigned poolTag = 'sysi';
-	class SysInfoManager {
+	class SysInfoManager
+	{
 	public:
-		typedef struct _DBGKD_DEBUG_DATA_HEADER64 {
+		typedef struct _DBGKD_DEBUG_DATA_HEADER64
+		{
 			LIST_ENTRY64 List;
 			ULONG           OwnerTag;
 			ULONG           Size;
 		} DBGKD_DEBUG_DATA_HEADER64, * PDBGKD_DEBUG_DATA_HEADER64;
-		typedef struct _KDDEBUGGER_DATA64 {
+		
+		typedef struct _KDDEBUGGER_DATA64
+		{
 
 			DBGKD_DEBUG_DATA_HEADER64 Header;
 
@@ -308,72 +306,79 @@ namespace kstd {
 
 		} KDDEBUGGER_DATA64, * PKDDEBUGGER_DATA64;
 
-
 	public:
 		static SysInfoManager* getInstance();
 		static void destory();
 		static void byPassSignCheck(PDRIVER_OBJECT drv);
+
 	public:
 		KDDEBUGGER_DATA64* getSysInfo() const { return	&__dumpHeader; }
 		ULONG getBuildNumber();
+
 	public:
-		inline static SysInfoManager* __instance;
+		inline static SysInfoManager* _instance;
 		inline static KDDEBUGGER_DATA64 __dumpHeader;
 	};
 
 
+	inline SysInfoManager* kstd::SysInfoManager::getInstance()
+	{
 
-	inline SysInfoManager* kstd::SysInfoManager::getInstance(){
+		UNICODE_STRING keCapturePersistentThreadStateName = RTL_CONSTANT_STRING(L"KeCapturePersistentThreadState");
+		char* tmp = 0;
 
-		UNICODE_STRING u_func_name = RTL_CONSTANT_STRING(L"KeCapturePersistentThreadState");
-		char* tmp = nullptr;
+		do
+		{
+			if (_instance)
+				break;
+			_instance = kalloc<SysInfoManager>(NonPagedPool, poolTag);
 
-		do {
-			if (__instance != nullptr) break;
-			__instance = reinterpret_cast<SysInfoManager*>(ExAllocatePoolWithTag(NonPagedPool,
-				sizeof SysInfoManager,
-				poolTag));
-		
-			if(__instance==nullptr) break;
+			if (!_instance)
+				break;
 
-#define DUMP_BLOCK_SIZE 0X40000
-
-			tmp = reinterpret_cast<char*>(ExAllocatePoolWithTag(NonPagedPool, DUMP_BLOCK_SIZE, 'sysI'));
-			if (tmp == nullptr) {
+			tmp = reinterpret_cast<char*>(ExAllocatePoolWithTag(NonPagedPool, DUMP_BLOCK_SIZE, poolTag));
+			if (!tmp)
+			{
 				break;
 			}
 			CONTEXT context = { 0 };
 			context.ContextFlags = CONTEXT_FULL;
 			RtlCaptureContext(&context);
-			
+
 			auto func = reinterpret_cast<void(*)(CONTEXT*, ULONG, ULONG, ULONG, ULONG, ULONG, ULONG, void*)>(
-				MmGetSystemRoutineAddress(&u_func_name));
-			if (func == nullptr) break;
+				MmGetSystemRoutineAddress(&keCapturePersistentThreadStateName));
+			if (!func)
+				break;
 
 			func(&context, 0, 0, 0, 0, 0, 0, tmp);
 
 			memcpy(&__dumpHeader, tmp + KDDEBUGGER_DATA_OFFSET, sizeof __dumpHeader);
 
-			if (tmp) ExFreePool(tmp);
-			return __instance;
+			if (tmp)
+				ExFreePoolWithTag(tmp, poolTag);
+
+			return _instance;
 
 		} while (false);
 
 
-		if (__instance != nullptr) {
-			ExFreePool(__instance);
-			__instance = nullptr;
+		if (_instance)
+		{
+			ExFreePool(_instance);
+			_instance = 0;
 		}
 
-		if (tmp) ExFreePool(tmp);
-		
+		if (tmp)
+			ExFreePool(tmp);
+
 		return nullptr;
 	}
 
 	inline void SysInfoManager::destory()
 	{
-		if (__instance != nullptr) {
-			ExFreePool(__instance);
+		if (_instance)
+		{
+			ExFreePool(_instance);
 		}
 	}
 
@@ -413,5 +418,5 @@ namespace kstd {
 
 
 
-	
+
 }

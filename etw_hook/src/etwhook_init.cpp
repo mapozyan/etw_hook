@@ -1,19 +1,28 @@
+#pragma warning(disable : 5040)
+
 #include <etwhook_init.hpp>
 #include <kstl/ksystem_info.hpp>
 #include <etwhook_utils.hpp>
 #include <kstl/kpe_parse.hpp>
 
-#pragma warning(disable : 4201)
+enum EtwpTrace
+{
+	EtwpStartTrace      = 1,
+	EtwpStopTrace       = 2,
+	EtwpQueryTrace      = 3,
+	EtwpUpdateTrace     = 4,
+	EtwpFlushTrace      = 5
+};
 
-#define EtwpStartTrace		1
-#define EtwpStopTrace		2
-#define EtwpQueryTrace		3
-#define EtwpUpdateTrace		4
-#define EtwpFlushTrace		5
+constexpr auto SyscallHookId = 0xf33ul;
 
 #define WNODE_FLAG_TRACED_GUID			0x00020000  // denotes a trace
 #define EVENT_TRACE_BUFFERING_MODE      0x00000400  // Buffering mode only
 #define EVENT_TRACE_FLAG_SYSTEMCALL     0x00000080  // system calls
+
+#define POOL_TAG 'IWTE'
+
+#pragma warning(disable : 4201)
 
 typedef struct _WNODE_HEADER
 {
@@ -39,9 +48,12 @@ typedef struct _WNODE_HEADER
 	GUID Guid;                  // Guid for data block returned with results
 	ULONG ClientContext;
 	ULONG Flags;             // Flags, see below
-} WNODE_HEADER, * PWNODE_HEADER;
+} WNODE_HEADER;
 
-typedef struct _EVENT_TRACE_PROPERTIES {
+#pragma warning(default : 4201)
+
+typedef struct _EVENT_TRACE_PROPERTIES
+{
 	WNODE_HEADER	Wnode;
 	ULONG			BufferSize;
 	ULONG			MinimumBuffers;
@@ -60,19 +72,17 @@ typedef struct _EVENT_TRACE_PROPERTIES {
 	HANDLE			LoggerThreadId;
 	ULONG			LogFileNameOffset;
 	ULONG			LoggerNameOffset;
-} EVENT_TRACE_PROPERTIES, * PEVENT_TRACE_PROPERTIES;
+} EVENT_TRACE_PROPERTIES;
 
-/* 54dea73a-ed1f-42a4-af713e63d056f174 */
 const GUID CkclSessionGuid = { 0x54dea73a, 0xed1f, 0x42a4, { 0xaf, 0x71, 0x3e, 0x63, 0xd0, 0x56, 0xf1, 0x74 } };
 
-/*这个是Nt kernel Logger 的 guid 其实设置谁都一样！*/
-const GUID session_guid = { 0x9E814AAD, 0x3204, 0x11D2, { 0x9A, 0x82, 0x0, 0x60, 0x8, 0xA8, 0x69, 0x39 } };
+const GUID NtklSessionGuid = { 0x9E814AAD, 0x3204, 0x11D2, { 0x9A, 0x82, 0x0, 0x60, 0x8, 0xA8, 0x69, 0x39 } };
 
 typedef struct _CKCL_TRACE_PROPERIES : EVENT_TRACE_PROPERTIES
 {
 	ULONG64					Unknown[3];
 	UNICODE_STRING			ProviderName;
-} CKCL_TRACE_PROPERTIES, * PCKCL_TRACE_PROPERTIES;
+} CKCL_TRACE_PROPERTIES;
 
 EXTERN_C
 NTSYSCALLAPI
@@ -91,9 +101,10 @@ EXTERN_C
 NTSYSCALLAPI
 NTSTATUS
 NTAPI
-ZwSetSystemInformation(ULONG info_class,void* buf,ULONG length);
+ZwSetSystemInformation(ULONG infoClass, void* buf, ULONG length);
 
-typedef enum _EVENT_TRACE_INFORMATION_CLASS {
+typedef enum _EVENT_TRACE_INFORMATION_CLASS
+{
 	EventTraceKernelVersionInformation,
 	EventTraceGroupMaskInformation,
 	EventTracePerformanceInformation,
@@ -132,232 +143,10 @@ typedef struct _EVENT_TRACE_SYSTEM_EVENT_INFORMATION
 const ULONG SystemPerformanceTraceInformation = 31;
 
 
-
-EtwInitilizer::EtwInitilizer() : __is_open(false)
+static unsigned char* GetEtwpMaxPmcCounter()
 {
-	
-	UNICODE_STRING func_name = {};
-
-	RtlInitUnicodeString(&func_name, L"HalPrivateDispatchTable");
-	HalPrivateDispatchTable = reinterpret_cast<UINT_PTR*>(MmGetSystemRoutineAddress(&func_name));
-	
-	if (HalPrivateDispatchTable == nullptr) {
-		LOG_ERROR("failed to get HalPrivateDispatchTable");
-	}
-
-}
-
-
-EtwInitilizer::~EtwInitilizer()
-{
-	/*如果开启着，那么需要关闭*/
-	if (__is_open) end_syscall_trace();
-}
-
-NTSTATUS EtwInitilizer::start_syscall_trace()
-{
-	auto status = STATUS_UNSUCCESSFUL;
-	auto ckcl_property = (PCKCL_TRACE_PROPERTIES)(nullptr);
-	auto returnlen = 0ul;
-
-	do {
-
-		ckcl_property = kalloc<CKCL_TRACE_PROPERTIES>(NonPagedPool,PAGE_SIZE);
-		if (!ckcl_property) {
-			LOG_ERROR("failed to alloc memory for etw property!\r\n");
-			status = STATUS_MEMORY_NOT_ALLOCATED;
-			break;
-		}
-
-		memset(ckcl_property, 0, PAGE_SIZE);
-		ckcl_property->Wnode.BufferSize = PAGE_SIZE;
-		ckcl_property->Wnode.Flags = WNODE_FLAG_TRACED_GUID;
-		//ckcl_property->ProviderName = RTL_CONSTANT_STRING(L"NT Kernel Logger");
-		//ckcl_property->Wnode.Guid = session_guid;
-		ckcl_property->ProviderName = RTL_CONSTANT_STRING(L"Circular Kernel Context Logger");
-		ckcl_property->Wnode.Guid = CkclSessionGuid;
-		ckcl_property->Wnode.ClientContext = 1;
-		ckcl_property->BufferSize = sizeof(ULONG);
-		ckcl_property->MinimumBuffers = ckcl_property->MaximumBuffers = 2;
-		ckcl_property->LogFileMode = EVENT_TRACE_BUFFERING_MODE;
-		
-		//enable kernel logger etw trace
-		status = ZwTraceControl(EtwpStartTrace, ckcl_property, PAGE_SIZE, ckcl_property, PAGE_SIZE, &returnlen);
-		
-		//sometimes may return value is STATUS_OBJECT_NAME_COLLISION
-		if (!NT_SUCCESS(status) && status!= STATUS_OBJECT_NAME_COLLISION) {
-			LOG_ERROR("failed to enable kernel loggger etw trace,errcode=%x\r\n", status);
-			break;
-		}
-
-		//start syscall etw
-		ckcl_property->EnableFlags = EVENT_TRACE_FLAG_SYSTEMCALL;
-
-		status=  ZwTraceControl(EtwpUpdateTrace, ckcl_property, PAGE_SIZE, ckcl_property, PAGE_SIZE, &returnlen);
-		if (!NT_SUCCESS(status)) {
-			LOG_ERROR("failed to enable syscall etw,errcode=%x\r\n", status);
-			end_syscall_trace();
-			break;
-		}
-
-	} while (false);
-
-	//clean up
-
-	if (ckcl_property) ExFreePool(ckcl_property);
-	
-	//if fail
-	//to do
-	
-	//if success clean
-	if (NT_SUCCESS(status)) __is_open = true;
-	
-	return status;
-}
-
-NTSTATUS EtwInitilizer::end_syscall_trace()
-{
-	auto status = STATUS_UNSUCCESSFUL;
-	auto ckcl_property = (PCKCL_TRACE_PROPERTIES)(nullptr);
-	auto returnlen = 0ul;
-
-	do {
-
-		ckcl_property = kalloc<CKCL_TRACE_PROPERTIES>(NonPagedPool, PAGE_SIZE);
-		if (!ckcl_property) {
-			LOG_ERROR("failed to alloc memory for etw property!\r\n");
-			status = STATUS_MEMORY_NOT_ALLOCATED;
-			break;
-		}
-
-		
-
-		memset(ckcl_property, 0, PAGE_SIZE);
-		ckcl_property->Wnode.BufferSize = PAGE_SIZE;
-		ckcl_property->Wnode.Flags = WNODE_FLAG_TRACED_GUID;
-		//ckcl_property->ProviderName = RTL_CONSTANT_STRING(L"NT Kernel Logger");
-		//ckcl_property->Wnode.Guid = session_guid;
-		ckcl_property->ProviderName = RTL_CONSTANT_STRING(L"Circular Kernel Context Logger");
-		ckcl_property->Wnode.Guid = CkclSessionGuid;
-		ckcl_property->Wnode.ClientContext = 1;
-		ckcl_property->BufferSize = sizeof(ULONG);
-		ckcl_property->MinimumBuffers = ckcl_property->MaximumBuffers = 2;
-		ckcl_property->LogFileMode = EVENT_TRACE_BUFFERING_MODE;
-
-		//enable kernel logger etw trace
-		status = ZwTraceControl(EtwpStopTrace, ckcl_property, PAGE_SIZE, ckcl_property, PAGE_SIZE, &returnlen);
-
-		if (!NT_SUCCESS(status)) {
-			LOG_ERROR("failed to stop kernel loggger etw trace,errcode=%x\r\n", status);
-			break;
-		}
-
-
-	} while (false);
-
-	//clean up
-	if (ckcl_property) ExFreePool(ckcl_property);
-	
-	if (NT_SUCCESS(status)) __is_open = false;
-
-	return status;
-}
-
-/*其实这个要调用ZwSetSystemInfomation，但是没有找到合适的文档化和文章，故只能手动逆向windows，最终得出结果*/
-NTSTATUS EtwInitilizer::open_pmc_counter()
-{
-	auto status = STATUS_SUCCESS;
-	auto pmc_count_info = (PEVENT_TRACE_PROFILE_COUNTER_INFORMATION)(nullptr);
-	auto pmc_event_info=(PEVENT_TRACE_SYSTEM_EVENT_INFORMATION)(nullptr);
-	constexpr auto syscall_hookid = 0xf33ul;
-
-
-
-	if (!__is_open) return STATUS_FLT_NOT_INITIALIZED;
-
-	do {
-
-		/*获取ckcl_context的loggerid*/
-		auto EtwpDebuggerData=reinterpret_cast<ULONG***>( \
-			kstd::SysInfoManager::getInstance()->getSysInfo()->EtwpDebuggerData);
-		
-		if (!EtwpDebuggerData) {
-			status = STATUS_NOT_SUPPORTED;
-			LOG_ERROR("failed to get EtwpDebuggerData!\r\n");
-		}
-		
-		/*这个可以参考第一版的ETW HOOK，这里简写了*/
-		auto logger_id = EtwpDebuggerData[2][2][0];
-
-		pmc_count_info = kalloc<EVENT_TRACE_PROFILE_COUNTER_INFORMATION>(NonPagedPool);
-		if (!pmc_count_info) {
-			LOG_ERROR("failed to alloc memory for pmc_count!\r\n");
-			status = STATUS_MEMORY_NOT_ALLOCATED;
-			break;
-		}
-		//先设置PMC Count 我们只关心一个hookid 那就是syscall的hookid 0xf33 profile source 随便设置
-		pmc_count_info->EventTraceInformationClass = EventTraceProfileCounterListInformation;
-		pmc_count_info->TraceHandle = ULongToHandle(logger_id)/*这个其实就是loggerid*/;
-		pmc_count_info->ProfileSource[0] = 1;/*随便填写*/
-
-		auto EtwpMaxPmcCounter=get_EtwpMaxPmcCounter();
-
-		auto org = (unsigned char)0;
-
-		if (MmIsAddressValid(EtwpMaxPmcCounter)) {
-
-			org = *EtwpMaxPmcCounter;
-
-			if (org <= 1) *EtwpMaxPmcCounter = 2;
-
-		}
-
-		status=ZwSetSystemInformation(SystemPerformanceTraceInformation, pmc_count_info, sizeof EVENT_TRACE_PROFILE_COUNTER_INFORMATION);
-		if (!NT_SUCCESS(status)) {
-			LOG_ERROR("failed to configure pmc counter,errcode=%x\r\n", status);
-			break;
-		}
-
-
-		if (MmIsAddressValid(EtwpMaxPmcCounter)) {
-			if (org <= 1) *EtwpMaxPmcCounter = org;
-		}
-
-		//然后设置PMC Event hookid只需要一个就行
-		pmc_event_info = kalloc<EVENT_TRACE_SYSTEM_EVENT_INFORMATION>(NonPagedPool);
-		if (!pmc_event_info) {
-			LOG_ERROR("failed to alloc memory for pmc_event_info!\r\n");
-			status = STATUS_MEMORY_NOT_ALLOCATED;
-			break;
-		}
-
-		pmc_event_info->EventTraceInformationClass = EventTraceProfileEventListInformation;
-		pmc_event_info->TraceHandle = ULongToHandle(logger_id);
-		pmc_event_info->HookId[0] = syscall_hookid;/*必须0xf33*/
-
-
-		status = ZwSetSystemInformation(SystemPerformanceTraceInformation, pmc_event_info, sizeof EVENT_TRACE_SYSTEM_EVENT_INFORMATION);
-		if (!NT_SUCCESS(status)) {
-			LOG_ERROR("failed to configure pmc event,errcode=%x\r\n", status);
-			break;
-		}
-
-		
-
-	} while (false);
-
-	//clean up
-	if (pmc_count_info) ExFreePool(pmc_count_info);
-	if (pmc_event_info) ExFreePool(pmc_event_info);
-
-	return status;
-}
-
-unsigned char* EtwInitilizer::get_EtwpMaxPmcCounter()
-{
-	auto ret = nullptr;
-	auto nt_img = (void*)nullptr;
-	auto nt_size = 0ul;
+	unsigned char* ret = 0;
+	void* kernelImageBase = 0;
 
 	//PAGE:00000001409DB8DE 44 3B 05 57 57 37 00                          cmp     r8d, cs:EtwpMaxPmcCounter
 	//PAGE : 00000001409DB8E5 0F 87 EC 00 00 00                           ja      loc_1409DB9D7
@@ -366,26 +155,250 @@ unsigned char* EtwInitilizer::get_EtwpMaxPmcCounter()
 	//PAGE : 00000001409DB8F8 48 83 B9 F8 03 00 00 00                     cmp     qword ptr[rcx + 3F8h], 0
 	//PAGE:00000001409DB900 75 0D                                         jnz     short loc_1409DB90F
 
-	//windows 18362开始有的
-	if (kstd::SysInfoManager::getInstance()->getBuildNumber() < 18362) return ret;
+	//Windows 18362 and later
+	if (kstd::SysInfoManager::getInstance()->getBuildNumber() < 18362)
+		return ret;
 
-	nt_img = find_module_base(L"ntoskrnl.exe", &nt_size);
+	kernelImageBase = FindModuleBase(L"ntoskrnl.exe", 0);
 
-	kstd::ParsePE ntos(nt_img, nt_size);
+	void* p = kstd::patternFindSections(
+		kernelImageBase,
+		"\x44\x3b\x05\x00\x00\x00\x00\x0f\x87\x00\x00\x00\x00\x83\xb9\x00\x00\x00\x00\x01\x0f\x84\x00\x00\x00\x00\x48\x83\xb9\x00\x00\x00\x00\x00\x75\x00",
+		"xxx????xx????xx????xxx????xxx????xx?",
+		"PAGE");
 
-	auto p = reinterpret_cast<unsigned char*>(ntos.patternFindSections((unsigned long long)nt_img, \
-		"\x44\x3b\x05\x00\x00\x00\x00\x0f\x87\x00\x00\x00\x00\x83\xb9\x00\x00\x00\x00\x01\x0f\x84\x00\x00\x00\x00\x48\x83\xb9\x00\x00\x00\x00\x00\x75\x00", \
-		"xxx????xx????xx????xxx????xxx????xx?", "PAGE"));
-
-
-	if (MmIsAddressValid(p)) {
-		auto offset = *reinterpret_cast<PLONG>(p + 3);
-		return p + 7 + offset;
+	if (p)
+	{
+		LONG offset = *reinterpret_cast<const LONG*>(reinterpret_cast<const char*>(p) + 3);
+		return reinterpret_cast<unsigned char*>(p) + 7 + offset;
 	}
-	else return nullptr;
-	
-
-	
+	else
+		return nullptr;
 }
 
-#pragma warning(default : 4201)
+EtwInitilizer::EtwInitilizer()
+	:
+	_isOpen(false),
+	_halPrivateDispatchTable(0)
+{
+	UNICODE_STRING funcName = {};
+
+	RtlInitUnicodeString(&funcName, L"HalPrivateDispatchTable");
+	_halPrivateDispatchTable = reinterpret_cast<UINT_PTR*>(MmGetSystemRoutineAddress(&funcName));
+
+	if (!_halPrivateDispatchTable)
+	{
+		LOG_ERROR("failed to get HalPrivateDispatchTable");
+	}
+
+}
+
+EtwInitilizer::~EtwInitilizer()
+{
+	if (_isOpen)
+		EndTrace();
+}
+
+NTSTATUS EtwInitilizer::StartTrace()
+{
+	NTSTATUS status = STATUS_UNSUCCESSFUL;
+	CKCL_TRACE_PROPERTIES* ckclProperty = 0;
+	ULONG lengthReturned = 0;
+
+	do
+	{
+		ckclProperty = kalloc<CKCL_TRACE_PROPERTIES>(NonPagedPool, POOL_TAG, PAGE_SIZE);
+		if (!ckclProperty)
+		{
+			LOG_ERROR("failed to alloc memory for etw property!\r\n");
+			status = STATUS_MEMORY_NOT_ALLOCATED;
+			break;
+		}
+
+		memset(ckclProperty, 0, PAGE_SIZE);
+		ckclProperty->Wnode.BufferSize = PAGE_SIZE;
+		ckclProperty->Wnode.Flags = WNODE_FLAG_TRACED_GUID;
+		ckclProperty->ProviderName = RTL_CONSTANT_STRING(L"Circular Kernel Context Logger");
+		ckclProperty->Wnode.Guid = CkclSessionGuid;
+		ckclProperty->Wnode.ClientContext = 1;
+		ckclProperty->BufferSize = sizeof(ULONG);
+		ckclProperty->MinimumBuffers = ckclProperty->MaximumBuffers = 2;
+		ckclProperty->LogFileMode = EVENT_TRACE_BUFFERING_MODE;
+
+		status = ZwTraceControl(EtwpStartTrace, ckclProperty, PAGE_SIZE, ckclProperty, PAGE_SIZE, &lengthReturned);
+
+		//sometimes may return value is STATUS_OBJECT_NAME_COLLISION
+		if (!NT_SUCCESS(status) && status != STATUS_OBJECT_NAME_COLLISION)
+		{
+			LOG_ERROR("failed to enable kernel loggger etw trace,errcode=%x\r\n", status);
+			break;
+		}
+
+		//start syscall etw
+		ckclProperty->EnableFlags = EVENT_TRACE_FLAG_SYSTEMCALL;
+
+		status = ZwTraceControl(EtwpUpdateTrace, ckclProperty, PAGE_SIZE, ckclProperty, PAGE_SIZE, &lengthReturned);
+		if (!NT_SUCCESS(status))
+		{
+			LOG_ERROR("failed to enable syscall etw, errcode=%x\r\n", status);
+			EndTrace();
+			break;
+		}
+
+	} while (false);
+
+	//clean up
+
+	if (ckclProperty)
+		ExFreePool(ckclProperty);
+
+	//if fail
+	//to do
+
+	//if success clean
+	if (NT_SUCCESS(status))
+		_isOpen = true;
+
+	return status;
+}
+
+NTSTATUS EtwInitilizer::EndTrace()
+{
+	NTSTATUS status = STATUS_UNSUCCESSFUL;
+	CKCL_TRACE_PROPERTIES* ckclProperty = 0;
+	ULONG lengthReturned = 0;
+
+	do
+	{
+		ckclProperty = kalloc<CKCL_TRACE_PROPERTIES>(NonPagedPool, POOL_TAG, PAGE_SIZE);
+		if (!ckclProperty)
+		{
+			LOG_ERROR("failed to alloc memory for etw property!\r\n");
+			status = STATUS_MEMORY_NOT_ALLOCATED;
+			break;
+		}
+
+		memset(ckclProperty, 0, PAGE_SIZE);
+		ckclProperty->Wnode.BufferSize = PAGE_SIZE;
+		ckclProperty->Wnode.Flags = WNODE_FLAG_TRACED_GUID;
+		ckclProperty->ProviderName = RTL_CONSTANT_STRING(L"Circular Kernel Context Logger");
+		ckclProperty->Wnode.Guid = CkclSessionGuid;
+		ckclProperty->Wnode.ClientContext = 1;
+		ckclProperty->BufferSize = sizeof(ULONG);
+		ckclProperty->MinimumBuffers = ckclProperty->MaximumBuffers = 2;
+		ckclProperty->LogFileMode = EVENT_TRACE_BUFFERING_MODE;
+
+		status = ZwTraceControl(EtwpStopTrace, ckclProperty, PAGE_SIZE, ckclProperty, PAGE_SIZE, &lengthReturned);
+
+		if (!NT_SUCCESS(status))
+		{
+			LOG_ERROR("failed to stop kernel loggger etw trace,errcode=%x\r\n", status);
+			break;
+		}
+
+	} while (false);
+
+	//clean up
+	if (ckclProperty)
+		ExFreePool(ckclProperty);
+
+	if (NT_SUCCESS(status))
+		_isOpen = false;
+
+	return status;
+}
+
+//In fact, this needs to call ZwSetSystemInfomation,
+//but I can't find suitable documentation and articles,
+//so I can only reverse Windows manually, and finally get the result
+NTSTATUS EtwInitilizer::OpenPmcCounter()
+{
+	NTSTATUS status = STATUS_SUCCESS;
+	PEVENT_TRACE_PROFILE_COUNTER_INFORMATION countInfo = 0;
+	PEVENT_TRACE_SYSTEM_EVENT_INFORMATION eventInfo = 0;
+
+	if (!_isOpen)
+		return STATUS_FLT_NOT_INITIALIZED;
+
+	do
+	{
+		//Get the loggerid of ckcl_context
+		ULONG*** etwpDebuggerData = reinterpret_cast<ULONG***>(
+			kstd::SysInfoManager::getInstance()->getSysInfo()->EtwpDebuggerData);
+
+		if (!etwpDebuggerData)
+		{
+			status = STATUS_NOT_SUPPORTED;
+			LOG_ERROR("failed to get EtwpDebuggerData!\r\n");
+			break;
+		}
+
+		//This can be referred to the first version of ETW HOOK, which is abbreviated here
+		auto loggerId = etwpDebuggerData[2][2][0];
+
+		countInfo = kalloc<EVENT_TRACE_PROFILE_COUNTER_INFORMATION>(NonPagedPool, POOL_TAG);
+		if (!countInfo)
+		{
+			LOG_ERROR("failed to alloc memory for pmc_count!\r\n");
+			status = STATUS_MEMORY_NOT_ALLOCATED;
+			break;
+		}
+		//First set PMC Count. We only care about one hookid, which is the hookid of syscall 0xf33 profile source. Set it casually.
+		countInfo->EventTraceInformationClass = EventTraceProfileCounterListInformation;
+		countInfo->TraceHandle = ULongToHandle(loggerId);//This is actually loggerid
+		countInfo->ProfileSource[0] = 1;//Fill in any
+
+		unsigned char* etwpMaxPmcCounter = GetEtwpMaxPmcCounter();
+
+		unsigned char org = 0;
+
+		if (etwpMaxPmcCounter)
+		{
+			org = *etwpMaxPmcCounter;
+			if (org <= 1)
+				*etwpMaxPmcCounter = 2;
+		}
+
+		status = ZwSetSystemInformation(SystemPerformanceTraceInformation, countInfo, sizeof EVENT_TRACE_PROFILE_COUNTER_INFORMATION);
+		if (!NT_SUCCESS(status))
+		{
+			LOG_ERROR("failed to configure pmc counter,errcode=%x\r\n", status);
+			break;
+		}
+
+		if (etwpMaxPmcCounter)
+		{
+			if (org <= 1)
+				*etwpMaxPmcCounter = org;
+		}
+
+		//Then you only need one to set the PMC Event hookid
+		eventInfo = kalloc<EVENT_TRACE_SYSTEM_EVENT_INFORMATION>(NonPagedPool, POOL_TAG);
+		if (!eventInfo)
+		{
+			LOG_ERROR("failed to alloc memory for eventInfo!\r\n");
+			status = STATUS_MEMORY_NOT_ALLOCATED;
+			break;
+		}
+
+		eventInfo->EventTraceInformationClass = EventTraceProfileEventListInformation;
+		eventInfo->TraceHandle = ULongToHandle(loggerId);
+		eventInfo->HookId[0] = SyscallHookId;
+
+		status = ZwSetSystemInformation(SystemPerformanceTraceInformation, eventInfo, sizeof EVENT_TRACE_SYSTEM_EVENT_INFORMATION);
+		if (!NT_SUCCESS(status))
+		{
+			LOG_ERROR("failed to configure pmc event,errcode=%x\r\n", status);
+			break;
+		}
+
+	} while (false);
+
+	if (countInfo)
+		ExFreePool(countInfo);
+
+	if (eventInfo)
+		ExFreePool(eventInfo);
+
+	return status;
+}

@@ -1,33 +1,28 @@
 #pragma once
-#ifndef _ETWHOOK_INIT_
-
-#define _ETWHOOK_INIT_
 
 #include <etwhook_base.hpp>
 
-
-class EtwInitilizer :public EtwBase 
+class EtwInitilizer : public EtwBase
 {
 public:
-
 	EtwInitilizer();
-
 	~EtwInitilizer();
 
-	NTSTATUS start_syscall_trace();
-	NTSTATUS end_syscall_trace();
+	NTSTATUS StartTrace();
+	NTSTATUS EndTrace();
 
-	/*打开这个 才会去HalPmcCounter函数执行*/
-	NTSTATUS open_pmc_counter();
+	//Only when this is turned on will the HalPmcCounter function be executed.
+	NTSTATUS OpenPmcCounter();
 
+	UINT_PTR* GetHalPrivateDispatchTable() const
+	{
+		return _halPrivateDispatchTable;
+	}
 
-	unsigned char* get_EtwpMaxPmcCounter();
-
-public:
-	UINT_PTR* HalPrivateDispatchTable;
 private:
-	
-	bool __is_open;
-};
+	EtwInitilizer(const EtwInitilizer&) = delete;
+	EtwInitilizer& operator=(const EtwInitilizer&) = delete;
 
-#endif
+	bool      _isOpen;
+	UINT_PTR* _halPrivateDispatchTable;
+};

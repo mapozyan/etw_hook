@@ -1,60 +1,57 @@
 #pragma once
+
 #include <refs.hpp>
 #include <etwhook_base.hpp>
 #include <etwhook_init.hpp>
 #include <kstl/kavl.hpp>
 
-class EtwHookManager  : public EtwBase
+class EtwHookManager : public EtwBase
 {
 private:
-	struct HookMap {
-		void* org_func;
-		void* detour_func;
+	struct HookMapEntry
+	{
+		void* original;
+		void* target;
 
-		bool operator==(const HookMap& rhs) const { return this->org_func == rhs.org_func; }
-		bool operator< (const HookMap& rhs) const { return this->org_func < rhs.org_func; }
-		bool operator> (const HookMap& rhs) const { return this->org_func > rhs.org_func; }
+		bool operator==(const HookMapEntry& rhs) const { return this->original == rhs.original; }
+		bool operator<(const HookMapEntry& rhs) const { return this->original < rhs.original; }
+		bool operator>(const HookMapEntry& rhs) const { return this->original > rhs.original; }
 	};
 
 public:
-	//单例
-	static EtwHookManager* get_instance();
+	//Singleton
+	static EtwHookManager* GetInstance();
 
-	NTSTATUS init();
+	NTSTATUS Initialize();
 
-	NTSTATUS destory();
+	NTSTATUS Destory();
 
-	NTSTATUS add_hook(void* org_syscall,void* detour_routine);
+	NTSTATUS add_hook(void* original, void* target);
 
-	NTSTATUS remove_hook(void* org_syscall);
+	NTSTATUS remove_hook(void* original);
 
 private:
-
 	EtwHookManager();
-
 	~EtwHookManager();
 
-	static void hk_halcollectpmccounters(void* ctx, unsigned long long trace_buffer_end);
+	static void HalCollectPmcCountersHook(void* context, ULONGLONG traceBufferEnd);
 
-	void stack_trace_to_syscall();
+	void TraceStackToSyscall();
 
-	void record_syscall(void** call_routine);
+	void ProcessSyscall(void** stackPos);
 
 private:
-	
-	kstd::kavl<HookMap> __hookmaps;
+	typedef void (*HalCollectPmcCountersProc)(void*, ULONGLONG);
 
-	EtwInitilizer __initilizer;
+	static HalCollectPmcCountersProc _originalHalCollectPmcCounters;
 
-	static EtwHookManager* __instance;
+	kstd::kavl<HookMapEntry> _hookMap;
 
-	static void(*__orghalcollectpmccounters)(void*, unsigned long long);
+	EtwInitilizer _initilizer;
 
-	const ULONG  __halcollectpmccounters_idx = 73;
+	static EtwHookManager* _instance;
 
-	void* __nt_img;
-	ULONG __nt_size;
-	ULONG_PTR __KiSystemServiceRepeat;
+	static const ULONG _halCollectPmcCountersIndex = 73;
 
-
+	void* _kiSystemServiceRepeat;
 };

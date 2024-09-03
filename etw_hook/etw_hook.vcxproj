@@ -128,6 +128,7 @@
     <IntDir>$(SolutionDir)objs\$(Platform)\$(ConfigurationName)\</IntDir>
     <ReferencePath>$(ReferencePath)</ReferencePath>
     <IncludePath>$(projectDir)include\;$(IncludePath)</IncludePath>
+    <RunCodeAnalysis>true</RunCodeAnalysis>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">
     <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
@@ -158,6 +159,7 @@
     <ClCompile>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -177,26 +179,10 @@
     <ClInclude Include="include\etwhook_init.hpp" />
     <ClInclude Include="include\etwhook_manager.hpp" />
     <ClInclude Include="include\etwhook_utils.hpp" />
-    <ClInclude Include="include\kstl\karray.hpp" />
-    <ClInclude Include="include\kstl\kautolock.hpp" />
     <ClInclude Include="include\kstl\kavl.hpp" />
-    <ClInclude Include="include\kstl\kcallback.hpp" />
-    <ClInclude Include="include\kstl\kcrypt.hpp" />
-    <ClInclude Include="include\kstl\kfile.hpp" />
-    <ClInclude Include="include\kstl\kfilter.hpp" />
-    <ClInclude Include="include\kstl\kfunctional.hpp" />
-    <ClInclude Include="include\kstl\khash_table.hpp" />
-    <ClInclude Include="include\kstl\khook.hpp" />
-    <ClInclude Include="include\kstl\kioctl.hpp" />
-    <ClInclude Include="include\kstl\klist.hpp" />
     <ClInclude Include="include\kstl\klog.hpp" />
-    <ClInclude Include="include\kstl\kmemory.hpp" />
-    <ClInclude Include="include\kstl\knet.hpp" />
     <ClInclude Include="include\kstl\kpe_parse.hpp" />
-    <ClInclude Include="include\kstl\kref.hpp" />
-    <ClInclude Include="include\kstl\kstring.hpp" />
     <ClInclude Include="include\kstl\ksystem_info.hpp" />
-    <ClInclude Include="include\kstl\kvector.hpp" />
     <ClInclude Include="include\refs.hpp" />
   </ItemGroup>
   <ItemGroup>

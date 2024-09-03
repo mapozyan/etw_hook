@@ -1,60 +1,70 @@
+#pragma warning(disable : 5040)
+
 #include <etwhook_manager.hpp>
 #include <kstl/ksystem_info.hpp>
 #include <kstl/kpe_parse.hpp>
 #include <etwhook_utils.hpp>
 #include <intrin.h>
 
+EtwHookManager* EtwHookManager::_instance = 0;
 
-EtwHookManager* EtwHookManager::__instance;
+EtwHookManager::HalCollectPmcCountersProc EtwHookManager::_originalHalCollectPmcCounters;
 
-void(* EtwHookManager::__orghalcollectpmccounters)(void*, unsigned long long);
 
-EtwHookManager* EtwHookManager::get_instance()
+EtwHookManager* EtwHookManager::GetInstance()
 {
-	if (!__instance) __instance = new EtwHookManager;
-	return __instance;
+	if (!_instance)
+		_instance = new EtwHookManager;
+
+	return _instance;
 }
 
-NTSTATUS EtwHookManager::init()
+
+NTSTATUS EtwHookManager::Initialize()
 {
 	auto status = STATUS_UNSUCCESSFUL;
 
-	/*检查是否分配单例的内存了*/
-	if (!__instance) return STATUS_MEMORY_NOT_ALLOCATED;
+	//Check whether the memory of the singleton is allocated
+	if (!_instance)
+		return STATUS_MEMORY_NOT_ALLOCATED;
 
-	/*这种方法不支持win7*/
-	auto info_instance=kstd::SysInfoManager::getInstance();
-	if (info_instance == nullptr) return STATUS_INSUFFICIENT_RESOURCES;
-	if (info_instance->getBuildNumber() <= 7601) 
+	//This method does not support win7
+	auto sysInfo = kstd::SysInfoManager::getInstance();
+
+	if (!sysInfo)
+		return STATUS_INSUFFICIENT_RESOURCES;
+
+	if (sysInfo->getBuildNumber() <= 7601)
 	{
 		LOG_ERROR("current os version is not supported!\r\n");
 		return STATUS_NOT_SUPPORTED;
 	}
 
-
 	do {
-		status = this->__initilizer.start_syscall_trace();
-		if (!NT_SUCCESS(status)) break;
+		status = _initilizer.StartTrace();
+		if (!NT_SUCCESS(status))
+			break;
 
 		/*set value above 1*/
 
-		status = this->__initilizer.open_pmc_counter();
-		if(!NT_SUCCESS(status)) break;
+		status = _initilizer.OpenPmcCounter();
+		if (!NT_SUCCESS(status))
+			break;
 
 
-		if (this->__initilizer.HalPrivateDispatchTable == nullptr) {
+		UINT_PTR* halPrivateDispatchTable = _initilizer.GetHalPrivateDispatchTable();
+		if (!halPrivateDispatchTable)
+		{
 			status = STATUS_UNSUCCESSFUL;
 			LOG_ERROR("failed to get HalPrivateDispatchTable address!\r\n");
 			break;
 		}
 
 		_disable();
-		/*swap*/
-		__orghalcollectpmccounters = reinterpret_cast<void(*)(void*, unsigned long long)> \
-			(this->__initilizer.HalPrivateDispatchTable[__halcollectpmccounters_idx]);
-	
-		this->__initilizer.HalPrivateDispatchTable[__halcollectpmccounters_idx] = \
-			reinterpret_cast<ULONG_PTR>(hk_halcollectpmccounters);
+
+		_originalHalCollectPmcCounters = reinterpret_cast<HalCollectPmcCountersProc>(halPrivateDispatchTable[_halCollectPmcCountersIndex]);
+
+		halPrivateDispatchTable[_halCollectPmcCountersIndex] = reinterpret_cast<ULONG_PTR>(HalCollectPmcCountersHook);
 
 		_enable();
 
@@ -71,66 +81,59 @@ NTSTATUS EtwHookManager::init()
 	return status;
 }
 
-NTSTATUS EtwHookManager::destory()
+
+NTSTATUS EtwHookManager::Destory()
 {
-	auto status = STATUS_UNSUCCESSFUL;
+	if (!_instance)
+		return STATUS_MEMORY_NOT_ALLOCATED;
 
-	if (!__instance) return STATUS_MEMORY_NOT_ALLOCATED;
+	delete _instance;
+	_instance = 0;
 
-	do {
-
-		delete __instance;
-
-		__instance = nullptr;
-
-		status = STATUS_SUCCESS;
-
-	} while (false);
-	
-
-	LARGE_INTEGER delay_time = {};
-	delay_time.QuadPart = -10 * 1000000 * 2;
-	KeDelayExecutionThread(KernelMode, false, &delay_time);
-
-
-	return status;
-}
-
-NTSTATUS EtwHookManager::add_hook(void* org_syscall, void* detour_routine)
-{
-	if (!__instance) return STATUS_FLT_NOT_INITIALIZED;
-
-	auto suc=__hookmaps.insert({ org_syscall,detour_routine });
-
-	return suc ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
-
-}
-
-NTSTATUS EtwHookManager::remove_hook(void* org_syscall)
-{
-	if(!__instance) return STATUS_FLT_NOT_INITIALIZED;
-	
-	auto need_delete = __hookmaps.find({ org_syscall,nullptr });
-
-	if (!need_delete) return STATUS_NOT_FOUND;
-
-	__hookmaps.remove(need_delete);
+	LARGE_INTEGER delayTime = {};
+	delayTime.QuadPart = -10 * 1000000 * 2;
+	KeDelayExecutionThread(KernelMode, false, &delayTime);
 
 	return STATUS_SUCCESS;
 }
 
-void EtwHookManager::hk_halcollectpmccounters(void* ctx, unsigned long long trace_buffer_end)
-{
-	//LOG_INFO("filter success! arg1->%llx,arg2->%llx\r\n", ctx, trace_buffer_end);
-	
-	/*有时候中断也会走这个函数，这里判断一下IRQL 好像必定是DPC_LEVEL? 大于这个不行*/
-	if(KeGetCurrentIrql()<=DISPATCH_LEVEL)
-		EtwHookManager::get_instance()->stack_trace_to_syscall();
-	
 
-	return __orghalcollectpmccounters(ctx, trace_buffer_end);
+NTSTATUS EtwHookManager::add_hook(void* original, void* target)
+{
+	if (!_instance)
+		return STATUS_FLT_NOT_INITIALIZED;
+
+	bool ok = _hookMap.Insert({original, target});
+
+	return ok ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+
 }
 
+
+NTSTATUS EtwHookManager::remove_hook(void* original)
+{
+	if (!_instance)
+		return STATUS_FLT_NOT_INITIALIZED;
+
+	auto entry = _hookMap.Find({original, nullptr});
+
+	if (!entry)
+		return STATUS_NOT_FOUND;
+
+	_hookMap.Remove(entry);
+
+	return STATUS_SUCCESS;
+}
+
+
+void EtwHookManager::HalCollectPmcCountersHook(void* context, ULONGLONG traceBufferEnd)
+{
+	// Sometimes the interrupt will go to this function. Here we can judge whether the IRQL must be DPC_LEVEL? It won't work if it is higher than this level.
+	if (KeGetCurrentIrql() <= DISPATCH_LEVEL)
+		EtwHookManager::GetInstance()->TraceStackToSyscall();
+
+	return _originalHalCollectPmcCounters(context, traceBufferEnd);
+}
 
 
 //sys_call_etw_entry
@@ -150,216 +153,130 @@ void EtwHookManager::hk_halcollectpmccounters(void* ctx, unsigned long long trac
 //48 83 C4 50                   add     rsp, 50h
 //49 8B C2                      mov     rax, r10
 //FF D0                         call    rax
-/*寻找方法是
-1.先确定是不是有魔数字(看起来好像是不需要？因为这种方法只有系统调用会进入filter 函数)
-2.确定KiSyscall64的起始和结束地址
-3.栈遍历，遍历到之后，是否是位于起始和结束地址 如果是，说明栈目前位于
+/*Finding a way is
+1.First determine whether there is a magic number (it seems unnecessary? Because this method only system calls will enter the filter function)
+2.Determine the start and end addresses of KiSyscall64
+3.After traversing the stack, is it at the start and end addresses? If so, it means the stack is currently at
 
 rsp->KiSyscall64.call    PerfInfoLogSysCallEntry
 rsp+0x48==TargetSystemCall
 
 */
 
-EtwHookManager::EtwHookManager() : __hookmaps() {
+EtwHookManager::EtwHookManager()
+	:
+	_hookMap()
+{
 
-	__nt_img = find_module_base(L"ntoskrnl.exe", &__nt_size);
+	void* kernelImageBase = FindModuleBase(L"ntoskrnl.exe", 0);
 
-	kstd::ParsePE ntos(__nt_img, __nt_size);
-
-
-	/*注意，这个方法并不严谨！没有直接readmsr IA32_LSTAR 然后使用反汇编引擎解析严谨*/
+	//Note that this method is not rigorous! There is no direct readmsr IA32_LSTAR and then use the disassembly engine to parse the rigorous
 	//KiSystemServiceRepeat:
 	//	4C 8D 15 85 6F 9F 00          lea     r10, KeServiceDescriptorTable
 	//	4C 8D 1D FE 20 8F 00          lea     r11, KeServiceDescriptorTableShadow
 	//	F7 43 78 80 00 00 00          test    dword ptr[rbx + 78h], 80h; GuiThread
-	/*KiSystemServiceRepeat一定位于KiSystemCall64之中，这个直接进行特征码搜索*/
+	//KiSystemServiceRepeat must be located in KiSystemCall64, which directly searches for the signature code
 
-	__KiSystemServiceRepeat = ntos.patternFindSections((unsigned long long)__nt_img, \
-		"\x4c\x8d\x15\x00\x00\x00\x00\x4c\x8d\x1d\x00\x00\x00\x00\xf7\x43", \
+	_kiSystemServiceRepeat = kstd::patternFindSections(kernelImageBase,
+		"\x4c\x8d\x15\x00\x00\x00\x00\x4c\x8d\x1d\x00\x00\x00\x00\xf7\x43",
 		"xxx????xxx????xx", ".text");
 
-	/*初始化二叉树*/
-	__hookmaps.init();
+	_hookMap.Initialize();
 }
+
 
 EtwHookManager::~EtwHookManager()
 {
-	/*关闭etw trace*/
-	__initilizer.end_syscall_trace();
+	_initilizer.EndTrace();
 
-	/*恢复HalPrivateHook*/
 	_disable();
-	this->__initilizer.HalPrivateDispatchTable[__halcollectpmccounters_idx] = \
-		reinterpret_cast<ULONG_PTR>(__orghalcollectpmccounters);
+	_initilizer.GetHalPrivateDispatchTable()[_halCollectPmcCountersIndex] = reinterpret_cast<ULONG_PTR>(_originalHalCollectPmcCounters);
 	_enable();
 
-	/*销毁HookMap*/
-	__hookmaps.destory();
-
+	_hookMap.Destory();
 }
 
 
-
-void EtwHookManager::stack_trace_to_syscall()
+void EtwHookManager::TraceStackToSyscall()
 {
-
-	//if (ExGetPreviousMode() == KernelMode)
-	//{
-	//	return;
-	//}
-
-	////
-	//// Extract the system call index (if you so desire).
-	////
-	////PKTHREAD CurrentThread = (PKTHREAD)__readgsqword(OFFSET_KPCR_CURRENT_THREAD);
-	////unsigned int SystemCallIndex = *(unsigned int*)((uintptr_t)CurrentThread + OFFSET_KTHREAD_SYSTEM_CALL_NUMBER);
-
-	//PVOID* StackMax = (PVOID*)__readgsqword(OFFSET_KPCR_RSP_BASE);
-
-
-	//PVOID* StackFrame = (PVOID*)_AddressOfReturnAddress();
-
-	////
-	//// First walk backwards on the stack to find the 2 magic values.
-	////
-	//for (PVOID* StackCurrent = StackMax;
-	//	StackCurrent > StackFrame;
-	//	--StackCurrent)
-	//{
-	//	// 
-	//	// This is intentionally being read as 4-byte magic on an 8
-	//	// byte aligned boundary.
-	//	//
-	//	PULONG AsUlong = (PULONG)StackCurrent;
-	//	if (*AsUlong != INFINITYHOOK_MAGIC_1)
-	//	{
-	//		continue;
-	//	}
-
-	//	// 
-	//	// If the first magic is set, check for the second magic.
-	//	//
-	//	--StackCurrent;
-
-	//	PUSHORT AsShort = (PUSHORT)StackCurrent;
-	//	if (*AsShort != INFINITYHOOK_MAGIC_2)
-	//	{
-	//		continue;
-	//	}
-
-	//	//
-	//	// Now we reverse the direction of the stack walk.
-	//	//
-	//	for (;
-	//		StackCurrent < StackMax;
-	//		++StackCurrent)
-	//	{
-	//		PULONGLONG AsUlonglong = (PULONGLONG)StackCurrent;
-
-	//		if (((uintptr_t)(*AsUlonglong) >= (uintptr_t)__KiSystemServiceRepeat &&
-	//			(uintptr_t)(*AsUlonglong) < (uintptr_t)((uintptr_t)__KiSystemServiceRepeat + (PAGE_SIZE * 2))))
-	//		{
-	//			record_syscall(StackCurrent);
-	//			break;
-	//			
-	//		}
-
-	//		//
-	//		// If you want to "hook" this function, replace this stack memory 
-	//		// with a pointer to your own function.
-	//		//
-	//		continue;
-	//	}
-
-	//	break;
-	//}
-
-
 	if (ExGetPreviousMode() == KernelMode)
 	{
 		return;
 	}
 
-	auto stack_max=(PVOID*)__readgsqword(0x1A8);
+	PVOID* stackLimit = reinterpret_cast<PVOID*>(__readgsqword(0x1A8));
 
-	auto cur_stack = (PVOID*)_AddressOfReturnAddress();
-	constexpr auto magic1 = 0x501802ul;
-	constexpr auto magic2 = 0xf33ul;
+	PVOID* stackPos = reinterpret_cast<PVOID*>(_AddressOfReturnAddress());
 
-	do {
+	constexpr auto MAGIC1 = 0x501802;
+	constexpr auto MAGIC2 = 0xf33;
 
-		if (!__KiSystemServiceRepeat) {
+	do
+	{
+
+		if (!_kiSystemServiceRepeat)
+		{
 			LOG_ERROR("failed to find KiSystemServiceRepeat\r\n");
 			break;
 		}
 
-		if (!__nt_img) {
-			LOG_ERROR("failed to find ntoskrnl.exe");
-			break;
-		}
-
-		//__debugbreak();
-
 		/*
-		* 
+		*
 		*			max
 					...
 					...
-		cur_stack->	xxx
+		stackPos->	xxx
 					...
 					magic_number
 					...
-					syscall   <-先从上面开始遍历
+					syscall   <-Start from the top
 		*/
 
-		/*开始遍历堆栈*/
+		for (; stackPos < stackLimit; ++stackPos)
+		{
+			PUSHORT stackAsUshort = reinterpret_cast<PUSHORT>(stackPos);
 
-		for (;cur_stack<stack_max;cur_stack++) {
+			if (*stackAsUshort != MAGIC2)
+				continue;
 
-			auto stack_as_ushort = reinterpret_cast<PUSHORT>(cur_stack);
+			++stackPos;
 
-			if(*stack_as_ushort != magic2) continue;
+			PULONG stackAsUlong = reinterpret_cast<PULONG>(stackPos);
 
-			cur_stack++;
+			if (*stackAsUlong != MAGIC1)
+				continue;
 
-			auto stack_as_ulong = reinterpret_cast<PULONG>(cur_stack);
-
-			if(*stack_as_ulong != magic1) continue;
-
-			/*开始遍历*/
-			for (; cur_stack < stack_max; cur_stack++) {
-				
-				if ((ULONG_PTR)*cur_stack >= (ULONG_PTR)PAGE_ALIGN(__KiSystemServiceRepeat) \
-					&&
-					(ULONG_PTR)*cur_stack <= (ULONG_PTR)PAGE_ALIGN(__KiSystemServiceRepeat + PAGE_SIZE * 2)
-					) {
-					//find 注意!!! 这个cur_stck不能100%保证是syscall，因为sys_exit的时候也会走到这
-					record_syscall(cur_stack);
+			for (; stackPos < stackLimit; ++stackPos)
+			{
+				if ((ULONG_PTR)*stackPos >= (ULONG_PTR)PAGE_ALIGN(_kiSystemServiceRepeat) &&
+					(ULONG_PTR)*stackPos <= (ULONG_PTR)PAGE_ALIGN(reinterpret_cast<const char*>(_kiSystemServiceRepeat) + PAGE_SIZE * 2))
+				{
+					//find
+					//Note!!! This cur_stck cannot be 100% guaranteed to be a syscall, because sys_exit will also go here
+					ProcessSyscall(stackPos);
 
 					break;
 				}
-
 			}
 
 			break;
-
 		}
 
-
 	} while (false);
-	
+
 }
 
-void EtwHookManager::record_syscall(void** call_routine)
+
+void EtwHookManager::ProcessSyscall(void** stackPos)
 {
 
-	auto hk_map=__hookmaps.find({ call_routine[9],nullptr });
+	auto entry = _hookMap.Find({stackPos[9], nullptr});
 
-	if (!hk_map) return;
+	if (!entry)
+		return;
 
-	if (hk_map->detour_func) {
-
-		call_routine[9] = hk_map->detour_func;
+	if (entry->target)
+	{
+		stackPos[9] = entry->target;
 	}
-
 }
