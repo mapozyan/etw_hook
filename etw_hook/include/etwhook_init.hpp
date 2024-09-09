@@ -23,6 +23,8 @@ private:
 	EtwInitilizer(const EtwInitilizer&) = delete;
 	EtwInitilizer& operator=(const EtwInitilizer&) = delete;
 
-	bool      _isOpen;
+	NTSTATUS StartStopTrace(bool start);
+
+	bool      _isActive;
 	UINT_PTR* _halPrivateDispatchTable;
 };

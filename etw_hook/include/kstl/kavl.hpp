@@ -26,7 +26,6 @@ namespace kstd
 
 		ULONG Size();
 
-		//No copy construction, move semantics Move assignment Assignment If necessary Add later
 		kavl() = default;
 		~kavl() = default;
 		kavl(const T& rhs) = delete;
@@ -145,12 +144,12 @@ namespace kstd
 		KeEnterCriticalRegion();
 		ExAcquireResourceExclusiveLite(_lock, true);
 
-		auto ret = (T*)RtlInsertElementGenericTableAvl(_table, (PVOID)&item, sizeof(T), nullptr);
+		T* entry = reinterpret_cast<T*>(RtlInsertElementGenericTableAvl(_table, (PVOID)&item, sizeof(T), nullptr));
 		//This function is a shallow copy, you must copy it manually
-		if (ret)
+		if (entry)
 		{
-			memset(ret, 0, sizeof(T));
-			*ret = move(item);
+			memset(entry, 0, sizeof(T));
+			*entry = move(item);
 			ok = true;
 		}
 
@@ -167,12 +166,12 @@ namespace kstd
 		KeEnterCriticalRegion();
 		ExAcquireResourceExclusiveLite(_lock, true);
 
-		auto f = reinterpret_cast<T*>(RtlLookupElementGenericTableAvl(_table, (PVOID)&item));
+		T* found = reinterpret_cast<T*>(RtlLookupElementGenericTableAvl(_table, (PVOID)&item));
 
 		ExReleaseResourceLite(_lock);
 		KeLeaveCriticalRegion();
 
-		return f;
+		return found;
 	}
 
 

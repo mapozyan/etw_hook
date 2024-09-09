@@ -26,9 +26,11 @@ public:
 
 	NTSTATUS Destory();
 
-	NTSTATUS add_hook(void* original, void* target);
+	NTSTATUS AddHook(void* original, void* target);
 
-	NTSTATUS remove_hook(void* original);
+	NTSTATUS RemoveHook(void* original);
+
+	void NotifyHookProcessed();
 
 private:
 	EtwHookManager();
@@ -43,6 +45,8 @@ private:
 private:
 	typedef void (*HalCollectPmcCountersProc)(void*, ULONGLONG);
 
+	bool _isInitialized;
+
 	static HalCollectPmcCountersProc _originalHalCollectPmcCounters;
 
 	kstd::kavl<HookMapEntry> _hookMap;
@@ -54,4 +58,6 @@ private:
 	static const ULONG _halCollectPmcCountersIndex = 73;
 
 	void* _kiSystemServiceRepeat;
+
+	volatile LONG _hooksActive;
 };

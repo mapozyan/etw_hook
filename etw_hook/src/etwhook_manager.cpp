@@ -22,11 +22,14 @@ EtwHookManager* EtwHookManager::GetInstance()
 
 NTSTATUS EtwHookManager::Initialize()
 {
-	auto status = STATUS_UNSUCCESSFUL;
-
 	//Check whether the memory of the singleton is allocated
 	if (!_instance)
 		return STATUS_MEMORY_NOT_ALLOCATED;
+
+	if (_isInitialized)
+		return STATUS_SUCCESS;
+
+	auto status = STATUS_UNSUCCESSFUL;
 
 	//This method does not support win7
 	auto sysInfo = kstd::SysInfoManager::getInstance();
@@ -36,7 +39,7 @@ NTSTATUS EtwHookManager::Initialize()
 
 	if (sysInfo->getBuildNumber() <= 7601)
 	{
-		LOG_ERROR("current os version is not supported!\r\n");
+		LOG_ERROR("current os version is not supported!");
 		return STATUS_NOT_SUPPORTED;
 	}
 
@@ -56,7 +59,7 @@ NTSTATUS EtwHookManager::Initialize()
 		if (!halPrivateDispatchTable)
 		{
 			status = STATUS_UNSUCCESSFUL;
-			LOG_ERROR("failed to get HalPrivateDispatchTable address!\r\n");
+			LOG_ERROR("failed to get HalPrivateDispatchTable address!");
 			break;
 		}
 
@@ -68,15 +71,9 @@ NTSTATUS EtwHookManager::Initialize()
 
 		_enable();
 
+		_isInitialized = true;
 
 	} while (false);
-
-
-	//clean up
-
-	//if fail
-
-	//if suc
 
 	return status;
 }
@@ -90,31 +87,20 @@ NTSTATUS EtwHookManager::Destory()
 	delete _instance;
 	_instance = 0;
 
-	LARGE_INTEGER delayTime = {};
-	delayTime.QuadPart = -10 * 1000000 * 2;
-	KeDelayExecutionThread(KernelMode, false, &delayTime);
-
 	return STATUS_SUCCESS;
 }
 
 
-NTSTATUS EtwHookManager::add_hook(void* original, void* target)
+NTSTATUS EtwHookManager::AddHook(void* original, void* target)
 {
-	if (!_instance)
-		return STATUS_FLT_NOT_INITIALIZED;
-
 	bool ok = _hookMap.Insert({original, target});
 
 	return ok ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
-
 }
 
 
-NTSTATUS EtwHookManager::remove_hook(void* original)
+NTSTATUS EtwHookManager::RemoveHook(void* original)
 {
-	if (!_instance)
-		return STATUS_FLT_NOT_INITIALIZED;
-
 	auto entry = _hookMap.Find({original, nullptr});
 
 	if (!entry)
@@ -126,11 +112,21 @@ NTSTATUS EtwHookManager::remove_hook(void* original)
 }
 
 
+void EtwHookManager::NotifyHookProcessed()
+{
+	InterlockedDecrement(&_hooksActive);
+}
+
+
 void EtwHookManager::HalCollectPmcCountersHook(void* context, ULONGLONG traceBufferEnd)
 {
-	// Sometimes the interrupt will go to this function. Here we can judge whether the IRQL must be DPC_LEVEL? It won't work if it is higher than this level.
+	// Sometimes the interrupt will call this function at IRQL > DISPATCH_LEVEL.
+	// This is not syscall processing, so we will skip it.
 	if (KeGetCurrentIrql() <= DISPATCH_LEVEL)
-		EtwHookManager::GetInstance()->TraceStackToSyscall();
+	{
+		if (_instance)
+			_instance->TraceStackToSyscall();
+	}
 
 	return _originalHalCollectPmcCounters(context, traceBufferEnd);
 }
@@ -165,7 +161,9 @@ rsp+0x48==TargetSystemCall
 
 EtwHookManager::EtwHookManager()
 	:
-	_hookMap()
+	_hookMap(),
+	_isInitialized(false),
+	_hooksActive(0)
 {
 
 	void* kernelImageBase = FindModuleBase(L"ntoskrnl.exe", 0);
@@ -177,7 +175,7 @@ EtwHookManager::EtwHookManager()
 	//	F7 43 78 80 00 00 00          test    dword ptr[rbx + 78h], 80h; GuiThread
 	//KiSystemServiceRepeat must be located in KiSystemCall64, which directly searches for the signature code
 
-	_kiSystemServiceRepeat = kstd::patternFindSections(kernelImageBase,
+	_kiSystemServiceRepeat = kstd::PatternFindSections(kernelImageBase,
 		"\x4c\x8d\x15\x00\x00\x00\x00\x4c\x8d\x1d\x00\x00\x00\x00\xf7\x43",
 		"xxx????xxx????xx", ".text");
 
@@ -189,11 +187,24 @@ EtwHookManager::~EtwHookManager()
 {
 	_initilizer.EndTrace();
 
-	_disable();
-	_initilizer.GetHalPrivateDispatchTable()[_halCollectPmcCountersIndex] = reinterpret_cast<ULONG_PTR>(_originalHalCollectPmcCounters);
-	_enable();
+	if (_originalHalCollectPmcCounters)
+	{
+		_disable();
+		_initilizer.GetHalPrivateDispatchTable()[_halCollectPmcCountersIndex] = reinterpret_cast<ULONG_PTR>(_originalHalCollectPmcCounters);
+		_enable();
+	}
 
 	_hookMap.Destory();
+
+	while (_hooksActive)
+	{
+		LOG_INFO("Hooks active: %d", _hooksActive);
+		// Wait for syscalls to complete
+		// WARNING! This is not safe, some syscalls (at least NtContinue) might still be active!
+		LARGE_INTEGER delayTime = {};
+		delayTime.QuadPart = -10 * 1000000 * 2;
+		KeDelayExecutionThread(KernelMode, false, &delayTime);
+	}
 }
 
 
@@ -216,7 +227,7 @@ void EtwHookManager::TraceStackToSyscall()
 
 		if (!_kiSystemServiceRepeat)
 		{
-			LOG_ERROR("failed to find KiSystemServiceRepeat\r\n");
+			LOG_ERROR("failed to find KiSystemServiceRepeat");
 			break;
 		}
 
@@ -277,6 +288,7 @@ void EtwHookManager::ProcessSyscall(void** stackPos)
 
 	if (entry->target)
 	{
+		InterlockedIncrement(&_hooksActive);
 		stackPos[9] = entry->target;
 	}
 }

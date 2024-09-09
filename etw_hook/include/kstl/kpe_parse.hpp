@@ -8,29 +8,29 @@ namespace kstd
 {
 	static const DWORD X64 = 0x8664;
 
-	static void* patternFind(void* addr, size_t size, const char* pattern, const char* mask);
+	static void* PatternFind(void* addr, size_t size, const char* pattern, const char* mask);
 
-	static void* patternFindSections(void* base, const char* pattern, const char* mask, const char* name);
+	static void* PatternFindSections(void* base, const char* pattern, const char* mask, const char* name);
 
-	static bool isValidX64PE(char* base);
+	static bool IsValidX64PE(char* base);
 
-	static bool patternCheck(const char* data, const char* pattern, const char* mask);
+	static bool PatternCheck(const char* data, const char* pattern, const char* mask);
 
-	inline void* patternFind(void* addr, size_t size, const char* pattern, const char* mask)
+	inline void* PatternFind(void* addr, size_t size, const char* pattern, const char* mask)
 	{
 		size -= strlen(mask);
 
 		for (size_t i = 0; i < size; ++i)
 		{
 			char* p = reinterpret_cast<char*>(addr) + i;
-			if (patternCheck(p, pattern, mask))
+			if (PatternCheck(p, pattern, mask))
 				return reinterpret_cast<void*>(p);
 		}
 
 		return 0;
 	}
 
-	static inline void* patternFindSections(void* base, const char* pattern, const char* mask, const char* name)
+	static inline void* PatternFindSections(void* base, const char* pattern, const char* mask, const char* name)
 	{
 		PIMAGE_DOS_HEADER dosHeader = reinterpret_cast<PIMAGE_DOS_HEADER>(base);
 		if (dosHeader->e_magic != IMAGE_DOS_SIGNATURE)
@@ -47,7 +47,7 @@ namespace kstd
 
 			if (strstr(reinterpret_cast<const char*>(p->Name), name))
 			{
-				void* result = patternFind(reinterpret_cast<char*>(base) + p->VirtualAddress, p->Misc.VirtualSize, pattern, mask);
+				void* result = PatternFind(reinterpret_cast<char*>(base) + p->VirtualAddress, p->Misc.VirtualSize, pattern, mask);
 				if (result)
 					return result;
 			}
@@ -56,7 +56,7 @@ namespace kstd
 		return 0;
 	}
 
-	static inline bool patternCheck(const char* data, const char* pattern, const char* mask)
+	static inline bool PatternCheck(const char* data, const char* pattern, const char* mask)
 	{
 		size_t len = strlen(mask);
 
@@ -71,7 +71,7 @@ namespace kstd
 		return true;
 	}
 
-	static inline bool isValidX64PE(char* base)
+	static inline bool IsValidX64PE(char* base)
 	{
 		if (!MmIsAddressValid(base)) return false;
 

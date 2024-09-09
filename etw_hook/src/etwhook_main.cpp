@@ -1,12 +1,11 @@
 #pragma warning(disable : 5040)
 
-#include <refs.hpp>
 #include <etwhook_init.hpp>
 #include <etwhook_manager.hpp>
 
 #define POOL_TAG 'TSET'
 
-NTSTATUS detour_NtCreateFile(
+NTSTATUS DetourNtCreateFile(
 	_Out_ PHANDLE FileHandle,
 	_In_ ACCESS_MASK DesiredAccess,
 	_In_ POBJECT_ATTRIBUTES ObjectAttributes,
@@ -29,12 +28,13 @@ NTSTATUS detour_NtCreateFile(
 
 		if (name)
 		{
-			RtlZeroMemory(name, ObjectAttributes->ObjectName->Length + sizeof(wchar_t));
 			RtlCopyMemory(name, ObjectAttributes->ObjectName->Buffer, ObjectAttributes->ObjectName->Length);
+			name[ObjectAttributes->ObjectName->Length / sizeof(wchar_t)] = 0;
 
 			if (wcsstr(name, L"oxygen.txt"))
 			{
 				ExFreePoolWithTag(name, POOL_TAG);
+				EtwHookManager::GetInstance()->NotifyHookProcessed();
 				return STATUS_ACCESS_DENIED;
 			}
 
@@ -43,36 +43,51 @@ NTSTATUS detour_NtCreateFile(
 	}
 
 
-	return NtCreateFile(FileHandle, DesiredAccess, ObjectAttributes,
+	NTSTATUS status = NtCreateFile(FileHandle, DesiredAccess, ObjectAttributes,
 		IoStatusBlock, AllocationSize, FileAttributes, ShareAccess,
 		CreateDisposition, CreateOptions, EaBuffer, EaLength);
+	
+	EtwHookManager::GetInstance()->NotifyHookProcessed();
+
+	return status;
 }
 
 
-NTSTATUS detour_NtClose(HANDLE h)
+NTSTATUS DetourNtClose(HANDLE h)
 {
-	//LOG_INFO("ZwClose caught\r\n");
-	return NtClose(h);
+	//LOG_INFO("ZwClose caught\n");
+	NTSTATUS status = NtClose(h);
+
+	EtwHookManager::GetInstance()->NotifyHookProcessed();
+
+	return status;
 }
 
 EXTERN_C NTSTATUS DriverEntry(PDRIVER_OBJECT driverObject, PUNICODE_STRING)
 {
-	auto status = STATUS_SUCCESS;
-
 	driverObject->DriverUnload = [](PDRIVER_OBJECT)
 	{
-		EtwHookManager::GetInstance()->Destory();
+		EtwHookManager* manager = EtwHookManager::GetInstance();
+		if (manager)
+			manager->Destory();
 	};
 
 	kstd::Logger::Initialize("etw_hook");
 
-	LOG_INFO("init...\r\n");
+	LOG_INFO("init...");
 
+	EtwHookManager* manager = EtwHookManager::GetInstance();
 
-	status = EtwHookManager::GetInstance()->Initialize();
+	if (manager)
+	{
+		NTSTATUS status = manager->Initialize();
 
-	EtwHookManager::GetInstance()->add_hook(NtCreateFile, detour_NtCreateFile);
-	EtwHookManager::GetInstance()->add_hook(NtClose, detour_NtClose);
+		if (NT_SUCCESS(status))
+		{
+			manager->AddHook(NtCreateFile, DetourNtCreateFile);
+			manager->AddHook(NtClose, DetourNtClose);
+		}
+	}
 
-	return status;
+	return STATUS_SUCCESS;
 }

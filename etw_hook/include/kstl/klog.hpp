@@ -62,7 +62,7 @@ namespace kstd
 		getCurSystemTime(time, sizeof time);
 
 		char message[512] = {};
-		RtlStringCchPrintfA(message, sizeof(message), "%s\t[tid %lld]\t[%s]\t", time, reinterpret_cast<UINT_PTR>(PsGetCurrentThreadId()), _info);
+		RtlStringCchPrintfA(message, sizeof(message), "%s\t[tid %05lld]\t[%s]\t", time, reinterpret_cast<UINT_PTR>(PsGetCurrentThreadId()), _info);
 
 		if (NT_SUCCESS(status))
 		{
@@ -80,6 +80,8 @@ namespace kstd
 
 			RtlStringCchCatA(message, sizeof(message), userMessage);
 
+			RtlStringCchCatA(message, sizeof(message), "\n");
+
 			DbgPrintEx(77, 0, message);
 		}
 
@@ -96,7 +98,7 @@ namespace kstd
 		ExSystemTimeToLocalTime(&systemTime, &localTime);
 		RtlTimeToTimeFields(&localTime, &timeFields);
 		sprintf_s(buf, size,
-			"[%4d-%2d-%2d %2d:%2d:%2d.%3d]",
+			"[%4d-%02d-%02d %02d:%02d:%02d.%03d]",
 			timeFields.Year, timeFields.Month, timeFields.Day,
 			timeFields.Hour, timeFields.Minute, timeFields.Second, timeFields.Milliseconds);
 	}
