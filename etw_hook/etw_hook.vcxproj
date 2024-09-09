@@ -179,7 +179,6 @@
     <ClInclude Include="include\etwhook_init.hpp" />
     <ClInclude Include="include\etwhook_manager.hpp" />
     <ClInclude Include="include\etwhook_utils.hpp" />
-    <ClInclude Include="include\kstl\kavl.hpp" />
     <ClInclude Include="include\kstl\klog.hpp" />
     <ClInclude Include="include\kstl\kpe_parse.hpp" />
     <ClInclude Include="include\kstl\ksystem_info.hpp" />

@@ -3,9 +3,19 @@
 #include <etwhook_init.hpp>
 #include <etwhook_manager.hpp>
 
+#define _countof(arr) (sizeof(arr) / sizeof(arr[0]))
+
 #define POOL_TAG 'TSET'
 
-NTSTATUS DetourNtCreateFile(
+static volatile LONG gHooksActive = 0;
+
+static volatile LONG gCallStats[0x0200] = {0};
+
+static volatile bool gIsUnloading = false;
+
+static void* gStatsThread = nullptr;
+
+static NTSTATUS DetourNtCreateFile(
 	_Out_ PHANDLE FileHandle,
 	_In_ ACCESS_MASK DesiredAccess,
 	_In_ POBJECT_ATTRIBUTES ObjectAttributes,
@@ -34,7 +44,7 @@ NTSTATUS DetourNtCreateFile(
 			if (wcsstr(name, L"oxygen.txt"))
 			{
 				ExFreePoolWithTag(name, POOL_TAG);
-				EtwHookManager::GetInstance()->NotifyHookProcessed();
+				InterlockedDecrement(&gHooksActive);
 				return STATUS_ACCESS_DENIED;
 			}
 
@@ -47,46 +57,116 @@ NTSTATUS DetourNtCreateFile(
 		IoStatusBlock, AllocationSize, FileAttributes, ShareAccess,
 		CreateDisposition, CreateOptions, EaBuffer, EaLength);
 	
-	EtwHookManager::GetInstance()->NotifyHookProcessed();
+	InterlockedDecrement(&gHooksActive);
 
 	return status;
 }
 
 
-NTSTATUS DetourNtClose(HANDLE h)
+static NTSTATUS DetourNtClose(HANDLE h)
 {
 	//LOG_INFO("ZwClose caught\n");
 	NTSTATUS status = NtClose(h);
 
-	EtwHookManager::GetInstance()->NotifyHookProcessed();
+	InterlockedDecrement(&gHooksActive);
 
 	return status;
 }
 
+static void __fastcall TestHookCallback(_In_ unsigned int systemCallIndex, _Inout_ void** systemCallFunction)
+{
+	UNREFERENCED_PARAMETER(systemCallIndex);
+
+	// We can overwrite the return address on the stack to our detours
+
+	InterlockedIncrement(gCallStats + systemCallIndex);
+
+	if (*systemCallFunction == NtCreateFile)
+	{
+		InterlockedIncrement(&gHooksActive);
+		*systemCallFunction = DetourNtCreateFile;
+	}
+	else if (*systemCallFunction == NtClose)
+	{
+		InterlockedIncrement(&gHooksActive);
+		*systemCallFunction = DetourNtClose;
+	}
+}
+
+static void StatsThreadRoutine(void* context)
+{
+	UNREFERENCED_PARAMETER(context);
+
+	for (int i = 0; !gIsUnloading; ++i)
+	{
+		if (!(i % 10)) // Once in 10 seconds
+		{
+			for (int j = 0; j < _countof(gCallStats); ++j)
+			{
+				if (gCallStats[j])
+				{
+					LOG_INFO("STATS: %d (0x%x) -> %d", j, j, gCallStats[j]);
+				}
+			}
+		}
+
+		LARGE_INTEGER delayTime = {};
+		delayTime.QuadPart = -10 * 1000000;//1 second
+		KeDelayExecutionThread(KernelMode, false, &delayTime);
+	}
+}
+
+static void DriverUnload(PDRIVER_OBJECT driverObject)
+{
+	UNREFERENCED_PARAMETER(driverObject);
+
+	gIsUnloading = true;
+
+	EtwHookManager* manager = EtwHookManager::GetInstance();
+	if (manager)
+		manager->Destory();
+
+	while (gHooksActive)
+	{
+		LOG_INFO("Hooks active: %d", gHooksActive);
+		// Wait for syscalls to complete
+		// WARNING! This is not safe, some syscalls (at least NtContinue) might still be active!
+		LARGE_INTEGER delayTime = {};
+		delayTime.QuadPart = -10 * 1000000 * 2;//2 seconds
+		KeDelayExecutionThread(KernelMode, false, &delayTime);
+	}
+
+	KeWaitForSingleObject(gStatsThread, Executive, KernelMode, FALSE, NULL);
+	ObDereferenceObject(gStatsThread);
+
+	LOG_INFO("Unloaded");
+}
+
 EXTERN_C NTSTATUS DriverEntry(PDRIVER_OBJECT driverObject, PUNICODE_STRING)
 {
-	driverObject->DriverUnload = [](PDRIVER_OBJECT)
-	{
-		EtwHookManager* manager = EtwHookManager::GetInstance();
-		if (manager)
-			manager->Destory();
-	};
+	driverObject->DriverUnload = DriverUnload;
 
 	kstd::Logger::Initialize("etw_hook");
 
-	LOG_INFO("init...");
+	LOG_INFO("Started");
 
 	EtwHookManager* manager = EtwHookManager::GetInstance();
 
 	if (manager)
 	{
-		NTSTATUS status = manager->Initialize();
+		manager->Initialize(TestHookCallback);
+	}
 
-		if (NT_SUCCESS(status))
-		{
-			manager->AddHook(NtCreateFile, DetourNtCreateFile);
-			manager->AddHook(NtClose, DetourNtClose);
-		}
+	HANDLE statsThreadHandle = nullptr;
+	OBJECT_ATTRIBUTES objectAttributes = {0};
+
+	InitializeObjectAttributes(&objectAttributes, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
+
+	NTSTATUS status = PsCreateSystemThread(&statsThreadHandle, THREAD_ALL_ACCESS, &objectAttributes, NtCurrentProcess(), NULL, StatsThreadRoutine, NULL);
+	if (NT_SUCCESS(status))
+	{
+		status = ObReferenceObjectByHandle(statsThreadHandle, THREAD_ALL_ACCESS, *PsThreadType, KernelMode, &gStatsThread, NULL);
+		ZwClose(statsThreadHandle);
 	}
 
 	return STATUS_SUCCESS;

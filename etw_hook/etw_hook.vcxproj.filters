@@ -22,9 +22,6 @@
     <ClInclude Include="include\refs.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="include\kstl\kavl.hpp">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="include\kstl\klog.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>

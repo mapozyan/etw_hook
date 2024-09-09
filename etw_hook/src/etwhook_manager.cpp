@@ -6,6 +6,11 @@
 #include <etwhook_utils.hpp>
 #include <intrin.h>
 
+#define OFFSET_KPCR_CURRENT_THREAD  0x188
+#define OFFSET_KPCR_RSP_BASE        0x1A8
+
+#define OFFSET_KTHREAD_SYSTEM_CALL_NUMBER 0x80
+
 EtwHookManager* EtwHookManager::_instance = 0;
 
 EtwHookManager::HalCollectPmcCountersProc EtwHookManager::_originalHalCollectPmcCounters;
@@ -20,7 +25,7 @@ EtwHookManager* EtwHookManager::GetInstance()
 }
 
 
-NTSTATUS EtwHookManager::Initialize()
+NTSTATUS EtwHookManager::Initialize(HOOK_CALLBACK hookCallback)
 {
 	//Check whether the memory of the singleton is allocated
 	if (!_instance)
@@ -71,6 +76,8 @@ NTSTATUS EtwHookManager::Initialize()
 
 		_enable();
 
+		_hookCallback = hookCallback;
+
 		_isInitialized = true;
 
 	} while (false);
@@ -88,33 +95,6 @@ NTSTATUS EtwHookManager::Destory()
 	_instance = 0;
 
 	return STATUS_SUCCESS;
-}
-
-
-NTSTATUS EtwHookManager::AddHook(void* original, void* target)
-{
-	bool ok = _hookMap.Insert({original, target});
-
-	return ok ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
-}
-
-
-NTSTATUS EtwHookManager::RemoveHook(void* original)
-{
-	auto entry = _hookMap.Find({original, nullptr});
-
-	if (!entry)
-		return STATUS_NOT_FOUND;
-
-	_hookMap.Remove(entry);
-
-	return STATUS_SUCCESS;
-}
-
-
-void EtwHookManager::NotifyHookProcessed()
-{
-	InterlockedDecrement(&_hooksActive);
 }
 
 
@@ -161,9 +141,8 @@ rsp+0x48==TargetSystemCall
 
 EtwHookManager::EtwHookManager()
 	:
-	_hookMap(),
 	_isInitialized(false),
-	_hooksActive(0)
+	_hookCallback(nullptr)
 {
 
 	void* kernelImageBase = FindModuleBase(L"ntoskrnl.exe", 0);
@@ -178,8 +157,6 @@ EtwHookManager::EtwHookManager()
 	_kiSystemServiceRepeat = kstd::PatternFindSections(kernelImageBase,
 		"\x4c\x8d\x15\x00\x00\x00\x00\x4c\x8d\x1d\x00\x00\x00\x00\xf7\x43",
 		"xxx????xxx????xx", ".text");
-
-	_hookMap.Initialize();
 }
 
 
@@ -193,18 +170,6 @@ EtwHookManager::~EtwHookManager()
 		_initilizer.GetHalPrivateDispatchTable()[_halCollectPmcCountersIndex] = reinterpret_cast<ULONG_PTR>(_originalHalCollectPmcCounters);
 		_enable();
 	}
-
-	_hookMap.Destory();
-
-	while (_hooksActive)
-	{
-		LOG_INFO("Hooks active: %d", _hooksActive);
-		// Wait for syscalls to complete
-		// WARNING! This is not safe, some syscalls (at least NtContinue) might still be active!
-		LARGE_INTEGER delayTime = {};
-		delayTime.QuadPart = -10 * 1000000 * 2;
-		KeDelayExecutionThread(KernelMode, false, &delayTime);
-	}
 }
 
 
@@ -215,9 +180,14 @@ void EtwHookManager::TraceStackToSyscall()
 		return;
 	}
 
-	PVOID* stackLimit = reinterpret_cast<PVOID*>(__readgsqword(0x1A8));
-
+	PVOID* stackLimit = reinterpret_cast<PVOID*>(__readgsqword(OFFSET_KPCR_RSP_BASE));
 	PVOID* stackPos = reinterpret_cast<PVOID*>(_AddressOfReturnAddress());
+
+	ULONG64 currentThread = __readgsqword(OFFSET_KPCR_CURRENT_THREAD);
+	unsigned systemCallIndex = *reinterpret_cast<unsigned*>(currentThread + OFFSET_KTHREAD_SYSTEM_CALL_NUMBER);
+
+	if (systemCallIndex >= 0x0200)
+		return;
 
 	constexpr auto MAGIC1 = 0x501802;
 	constexpr auto MAGIC2 = 0xf33;
@@ -264,7 +234,7 @@ void EtwHookManager::TraceStackToSyscall()
 				{
 					//find
 					//Note!!! This cur_stck cannot be 100% guaranteed to be a syscall, because sys_exit will also go here
-					ProcessSyscall(stackPos);
+					ProcessSyscall(systemCallIndex, stackPos);
 
 					break;
 				}
@@ -278,17 +248,8 @@ void EtwHookManager::TraceStackToSyscall()
 }
 
 
-void EtwHookManager::ProcessSyscall(void** stackPos)
+void EtwHookManager::ProcessSyscall(unsigned systemCallIndex, void** stackPos)
 {
-
-	auto entry = _hookMap.Find({stackPos[9], nullptr});
-
-	if (!entry)
-		return;
-
-	if (entry->target)
-	{
-		InterlockedIncrement(&_hooksActive);
-		stackPos[9] = entry->target;
-	}
+	if (_hookCallback)
+		_hookCallback(systemCallIndex, &stackPos[9]);
 }

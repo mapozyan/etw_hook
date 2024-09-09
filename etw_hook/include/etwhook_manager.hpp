@@ -3,7 +3,8 @@
 #include <refs.hpp>
 #include <etwhook_base.hpp>
 #include <etwhook_init.hpp>
-#include <kstl/kavl.hpp>
+
+typedef void(__fastcall* HOOK_CALLBACK)(_In_ unsigned int systemCallIndex, _Inout_ void** systemCallFunction);
 
 class EtwHookManager : public EtwBase
 {
@@ -22,15 +23,9 @@ public:
 	//Singleton
 	static EtwHookManager* GetInstance();
 
-	NTSTATUS Initialize();
+	NTSTATUS Initialize(HOOK_CALLBACK hookCallback);
 
 	NTSTATUS Destory();
-
-	NTSTATUS AddHook(void* original, void* target);
-
-	NTSTATUS RemoveHook(void* original);
-
-	void NotifyHookProcessed();
 
 private:
 	EtwHookManager();
@@ -40,7 +35,7 @@ private:
 
 	void TraceStackToSyscall();
 
-	void ProcessSyscall(void** stackPos);
+	void ProcessSyscall(unsigned systemCallIndex, void** stackPos);
 
 private:
 	typedef void (*HalCollectPmcCountersProc)(void*, ULONGLONG);
@@ -49,15 +44,13 @@ private:
 
 	static HalCollectPmcCountersProc _originalHalCollectPmcCounters;
 
-	kstd::kavl<HookMapEntry> _hookMap;
-
 	EtwInitilizer _initilizer;
 
 	static EtwHookManager* _instance;
 
 	static const ULONG _halCollectPmcCountersIndex = 73;
 
-	void* _kiSystemServiceRepeat;
+	HOOK_CALLBACK _hookCallback;
 
-	volatile LONG _hooksActive;
+	void* _kiSystemServiceRepeat;
 };
